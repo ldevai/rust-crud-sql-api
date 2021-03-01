@@ -1,0 +1,36 @@
+version: "3.8"
+
+services:
+  app:
+    container_name: rust-crud-sql-api
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - 8000:8000
+    depends_on:
+      - db
+    restart: always
+    environment:
+      COMPOSE_CONVERT_WINDOWS_PATHS: 1
+
+  db:
+    container_name: rust-crud-sql-db
+    image: postgres:latest
+    user: 'root'
+    ports:
+      - 5432:5432
+    volumes:
+      - ./data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    restart: always
+
+  adminer:
+    container_name: rust-crud-sql-adminer
+    image: adminer
+    restart: always
+    ports:
+      - 8080:8080

@@ -1,9 +1,45 @@
-### Development environment setup
-Create and start postgres database with docker:
+# Rust Crud Application using Warp and SQL (Postgres) with JWT authentication
 
-    docker-compose up -f db
+This boilerplate application offers the following endpoints, with JWT role-based validation on most of them:
 
-Connect to the database with your favorite client and create the tables in **db/initial.sql***
+| Path | Method |
+|------|--------|
+| /api/auth/register | POST |
+| /api/auth/login | POST |
+| /api/articles_home | GET |
+| /api/articles | GET |
+| /api/articles/{url} | GET |
+| /api/articles/updateHomeView/{id} | GET |
+| /api/articles | POST |
+| /api/articles | PUT |
+| /api/articles/{id} | DELETE |
+| /api/articles/comments | POST |
+| /api/articles/comments/{article_id}/{comment_id} | DELETE |
+| /api/users | GET |
+| /api/users/{id} | GET |
+| /api/users/updateHomeView/{id} | GET |
+| /api/users | POST |
+| /api/users | PUT |
+| /api/users/{id} | DELETE |
+| /api/users/changePassword | PUT |
+
+<br />
+
+The **.env** file contains the mongodb connection details and encryption keys.
+
+<br />
+
+
+## Development environment setup
+
+Requirements: rust toolchain, docker, docker-container
+
+Create and start a postgres instance with docker:
+
+    docker-compose up -d db adminer
+
+
+Open **adminer** on your browser at **http://localhost:8080** (or your preferred SQL client) and create the tables in **db/initial.sql***
 
     Type: Postgres
     Server: localhost
@@ -12,16 +48,20 @@ Connect to the database with your favorite client and create the tables in **db/
     Password: demo
     Database: demo
 
-*Optional*: Start the **adminer** docker browser-based SQL client and access it at **http://localhost:8080**:
+<br />
 
-    docker-compose up -f adminer
-
+## Running the Application
 Run the application with the command:
 
     cargo run
 
+Alternatively, you can run the command below to relaunch at any changes to the given resources:
 
-### Testing the Application ###
+    cargo watch -w src -w Cargo.toml -w .env -x run
+
+<br />
+
+## Testing
 
 #### Register
 
@@ -40,13 +80,18 @@ If everything is working, and you are using Linux/MacOS/Cygwin or have access to
 
 Querying the /users API without Admin role should result in an 401 Unauthorized error.
 
-#### Change user role to admin and login again:
+#### Change user role to Admin on Adminer console and login again:
 
     UPDATE users SET role='Admin' WHERE email='test@test.com';
 
+<br />
+
+
+### Articles API
+
 #### Get articles
 
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users
+    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles
 
 #### Create article
 
@@ -71,9 +116,9 @@ Check article after updated:
     ID=$(curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles | python -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])')
     curl -X DELETE -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles/${ID}
 
-Extra: Users API
+### Users API
 
-#### Get users
+##### Get users
 
     curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users
 
@@ -95,14 +140,18 @@ Get updated user field
 
     curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users | python -c 'import json,sys;print(json.load(sys.stdin)[1]["email"])'
 
-### Building the application
+<br />
+
+### **Building the application**
 
 #### Install sqlx-cli cargo dependency:
 
     cargo install sqlx-cli
 
+Generate sqlx schema file required for "offline" builds (without need to reach DB on build time). This step is only required if any table schema is changed.
+
+    cargo sqlx prepare
+
 #### Run cargo build
 
     cargo build --release
-
-    

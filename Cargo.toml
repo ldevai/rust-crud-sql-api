@@ -2,22 +2,22 @@
 name = "rust-crud-sql"
 version = "0.1.0"
 authors = ["Leonardo Devai <leonardo@devai.io>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
-tokio = { version = "0.2", features = ["full"] }
-warp = "0.2"
+tokio = { version = "1.38.0", features = ["full"] }
+warp = "0.3.7"
 dotenv = "0.15.0"
-clap = "3.0.0-beta.2"
-serde = { version = "1.0.118", features = ["derive"] }
-serde_json = "1.0.60"
-jsonwebtoken = "7.2.0"
+clap = { version = "4.5.8", features = ["derive", "env"] }
+serde = { version = "1.0.203", features = ["derive"] }
+serde_json = "1.0.120"
+jsonwebtoken = "9.3.0"
 argonautica = "0.2.0"
-chrono = { version = "0.4.19", features = ["serde"] }
-uuid = { version = "0.8.1", features = ["serde", "v4"] }
-anyhow = "1.0.36"
-thiserror = "1.0.22"
-sqlx = { version = "0.4.2", default-features = false, features = ["runtime-tokio-rustls", "macros", "postgres", "uuid", "chrono", "json", "offline"] }
+chrono = { version = "0.4.38", features = ["serde"] }
+uuid = { version = "1.9.1", features = ["serde", "v4"] }
+anyhow = "1.0.86"
+thiserror = "1.0.61"
+sqlx = { version = "0.7.4", features = ["runtime-tokio", "tls-rustls", "macros", "postgres", "uuid", "chrono", "json"] }
 
 [[bin]]
 name = "rust-crud-sql"

@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::net::SocketAddr;
 
-use clap::Clap;
+use clap::Parser;
 use sqlx::postgres::PgPool;
 use warp::Filter;
 
@@ -16,7 +16,7 @@ pub struct Environment {
     argon: Argon,
 }
 
-#[derive(Clone, Clap, Debug)]
+#[derive(Clone, Parser, Debug)]
 #[clap(
 name = "demo-api",
 rename_all = "kebab-case",

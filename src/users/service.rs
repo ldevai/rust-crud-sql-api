@@ -1,104 +1,79 @@
-use chrono::Utc;
-use sqlx::{postgres::PgPool, query_as_unchecked, query_unchecked};
-use warp::Rejection;
+use sqlx::PgPool;
+use uuid::Uuid;
 
-use crate::error::{AuthError, DatabaseError};
+use crate::auth::Role;
+use crate::error::{ApiError, conflict_on_duplicate};
 use crate::users::models::{User, UserCreateRequest, UserUpdateRequest};
 
-pub async fn get_user_by_id(_id: uuid::Uuid, connection: &PgPool) -> Result<Option<User>, Rejection> {
-    let user = query_as_unchecked!(
-        User,
-        r#"SELECT id, email, name, password, role, created_at, updated_at FROM users WHERE id = $1"#,
-        _id
-    )
-        .fetch_one(connection)
-        .await
-        .map_err(|_e| {
-            AuthError::InvalidCredentials
-        })
-        .ok();
+const EMAIL_TAKEN: &str = "email already registered";
+
+pub async fn get_users(db: &PgPool) -> Result<Vec<User>, ApiError> {
+    let users = sqlx::query_as("SELECT * FROM users ORDER BY created_at")
+        .fetch_all(db)
+        .await?;
+    Ok(users)
+}
+
+pub async fn get_user_by_id(db: &PgPool, id: Uuid) -> Result<Option<User>, ApiError> {
+    let user = sqlx::query_as("SELECT * FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(db)
+        .await?;
     Ok(user)
 }
 
-pub async fn get_user_by_email(email: &str, connection: &PgPool) -> Result<Option<User>, Rejection> {
-    let user = query_as_unchecked!(
-        User,
-        r#"SELECT id, email, name, password, role, created_at, updated_at FROM users WHERE email = $1"#,
-        email
-    )
-        .fetch_one(connection)
-        .await
-        .map_err(|_e| {
-            AuthError::InvalidCredentials
-        })
-        .ok();
+pub async fn get_user_by_email(db: &PgPool, email: &str) -> Result<Option<User>, ApiError> {
+    let user = sqlx::query_as("SELECT * FROM users WHERE email = $1")
+        .bind(email)
+        .fetch_optional(db)
+        .await?;
     Ok(user)
 }
 
-pub async fn get_users(connection: &PgPool) -> Result<Option<Vec<User>>, Rejection> {
-    let result = query_as_unchecked!(
-        User,
-        r#"SELECT id, email, name, password, role, created_at, updated_at FROM users"#
+pub async fn create_user(
+    db: &PgPool,
+    req: &UserCreateRequest,
+    password_hash: &str,
+    role: Role,
+) -> Result<User, ApiError> {
+    sqlx::query_as(
+        "INSERT INTO users (email, name, password_hash, role) VALUES ($1, $2, $3, $4) RETURNING *",
     )
-        .fetch_all(connection)
-        .await
-        .map_err(|_e| { anyhow::Error::new(_e) })
-        .ok();
-    Ok(result)
+    .bind(&req.email)
+    .bind(&req.name)
+    .bind(password_hash)
+    .bind(role.as_str())
+    .fetch_one(db)
+    .await
+    .map_err(conflict_on_duplicate(EMAIL_TAKEN))
 }
 
-
-pub async fn create_user(_req: UserCreateRequest, connection: &PgPool) -> Result<u64, DatabaseError> {
-    let result = query_unchecked!(
-        r#"INSERT INTO users (id, email, name, password, role, created_at) VALUES ($1, $2, $3, $4, $5, $6)"#,
-        uuid::Uuid::new_v4(),
-        _req.email,
-        _req.name,
-        _req.password,
-        _req.role.unwrap().to_string(),
-        Utc::now()
+pub async fn update_user(db: &PgPool, req: &UserUpdateRequest) -> Result<Option<User>, ApiError> {
+    sqlx::query_as(
+        "UPDATE users SET email = $1, name = $2, role = $3, updated_at = now() WHERE id = $4 RETURNING *",
     )
-        .execute(connection)
-        .await
-        .map(|_| 0)
-        .map_err(|_e| {
-            let _reply = match _e.as_database_error() {
-                None => println!("ERR"),
-                Some(err) => {
-                    println!("ERR {:?}", err.message().to_string());
-                    return DatabaseError {  message: err.message().to_string() };
-                }
-            };
-            return DatabaseError{ message: String::from("test")};
-        });
-
-    return result;
+    .bind(&req.email)
+    .bind(&req.name)
+    .bind(req.role.as_str())
+    .bind(req.id)
+    .fetch_optional(db)
+    .await
+    .map_err(conflict_on_duplicate(EMAIL_TAKEN))
 }
 
-pub async fn update_user(_req: UserUpdateRequest, connection: &PgPool) -> Option<Rejection> {
-    query_unchecked!(
-        r#"UPDATE users SET email=$1, name=$2, role=$3, updated_at=$4 WHERE id=$5"#,
-        _req.email,
-        _req.name,
-        _req.role,
-        Utc::now(),
-        _req.id
-    )
-        .execute(connection)
-        .await
-        .unwrap();
-    None
+pub async fn update_password(db: &PgPool, id: Uuid, password_hash: &str) -> Result<(), ApiError> {
+    sqlx::query("UPDATE users SET password_hash = $1, updated_at = now() WHERE id = $2")
+        .bind(password_hash)
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(())
 }
 
-pub async fn update_user_password(_req: User, connection: &PgPool) -> Option<Rejection> {
-    query_unchecked!(
-        r#"UPDATE users SET password=$1, updated_at=$2 WHERE id=$3"#,
-        _req.password,
-        Utc::now(),
-        _req.id
-    )
-        .execute(connection)
-        .await
-        .unwrap();
-    None
+pub async fn delete_user(db: &PgPool, id: Uuid) -> Result<bool, ApiError> {
+    let result = sqlx::query("DELETE FROM users WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }

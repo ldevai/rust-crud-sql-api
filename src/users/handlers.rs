@@ -1,94 +1,106 @@
-use warp::Reply;
-use serde_json::json;
+use uuid::Uuid;
+use warp::http::StatusCode;
+use warp::{Rejection, Reply};
 
-use crate::auth::models::{AuthUser, Role};
+use crate::auth::models::AuthUser;
+use crate::auth::{Role, hash_password, verify_password};
 use crate::environment::Environment;
-use crate::users::models::{PasswordUpdateRequest, UserUpdateRequest, UserCreateRequest};
+use crate::error::ApiError;
+use crate::users::models::{
+    PasswordUpdateRequest, UserCreateRequest, UserUpdateRequest, validate_password,
+    validate_profile,
+};
 use crate::users::service;
-use crate::WebResult;
-use crate::error::{UserError, AuthError};
 
-// Returns all users
-pub async fn get_users_handler(_env: Environment, _user: AuthUser) -> WebResult<impl Reply> {
-    println!("[get_users_handler] Action performed by {}", _user);
-    let result = service::get_users(_env.db()).await?;
-    Ok(warp::reply::json(&result))
+fn user_not_found() -> ApiError {
+    ApiError::not_found("user not found")
 }
 
-// Returns user with given id
-pub async fn get_user_by_id_handler(_id: String, _env: Environment, _user: AuthUser) -> WebResult<impl Reply> {
-    let uuid = uuid::Uuid::parse_str(&_id).unwrap();
-    let _result = service::get_user_by_id(uuid, _env.db()).await?;
-    println!("[get_user_by_id_handler] id={}, email={}", _id, &_result.clone().unwrap().email);
-    Ok(warp::reply::json(&_result))
+pub async fn get_users_handler(
+    _admin: AuthUser,
+    env: Environment,
+) -> Result<impl Reply, Rejection> {
+    let users = service::get_users(&env.db).await?;
+    Ok(warp::reply::json(&users))
 }
 
-// Creates new user. Same logic as in registration service.
-pub async fn user_create_handler(mut _req: UserCreateRequest, _env: Environment, _user: AuthUser) -> WebResult<impl Reply> {
-    match service::get_user_by_email(&_req.email, _env.db()).await {
-        Ok(None) => (),
-        Ok(existing) => {
-            println!("[user_create_handler] User {} already exists", &existing.unwrap().email);
-            return Ok(warp::reply::json(&json!({"status":"error", "message":"Unable to create user, email already registered"})))
-        },
-        _ => (),
+pub async fn get_user_by_id_handler(
+    id: Uuid,
+    _admin: AuthUser,
+    env: Environment,
+) -> Result<impl Reply, Rejection> {
+    let user = service::get_user_by_id(&env.db, id)
+        .await?
+        .ok_or_else(user_not_found)?;
+    Ok(warp::reply::json(&user))
+}
+
+/// Like registration, but an admin may pick the role (default `User`).
+pub async fn user_create_handler(
+    _admin: AuthUser,
+    mut req: UserCreateRequest,
+    env: Environment,
+) -> Result<impl Reply, Rejection> {
+    req.normalize();
+    req.validate()?;
+    let password_hash = hash_password(req.password.clone()).await?;
+    let role = req.role.unwrap_or(Role::User);
+    let user = service::create_user(&env.db, &req, &password_hash, role).await?;
+    Ok(warp::reply::with_status(
+        warp::reply::json(&user),
+        StatusCode::CREATED,
+    ))
+}
+
+/// Role changes reach the user's JWT at their next login.
+pub async fn user_update_handler(
+    _admin: AuthUser,
+    mut req: UserUpdateRequest,
+    env: Environment,
+) -> Result<impl Reply, Rejection> {
+    req.email = req.email.trim().to_lowercase();
+    req.name = req.name.trim().to_string();
+    validate_profile(&req.email, &req.name)?;
+    let user = service::update_user(&env.db, &req)
+        .await?
+        .ok_or_else(user_not_found)?;
+    Ok(warp::reply::json(&user))
+}
+
+pub async fn user_delete_handler(
+    id: Uuid,
+    _admin: AuthUser,
+    env: Environment,
+) -> Result<impl Reply, Rejection> {
+    if !service::delete_user(&env.db, id).await? {
+        return Err(user_not_found().into());
     }
+    Ok(StatusCode::NO_CONTENT)
+}
 
-    let hash = _env.argon().hasher().with_password(&_req.password).hash().unwrap();
-    _req.password = hash;
-    _req.role = Some(Role::User);
+/// Users change their own password (current one required); admins can reset anyone's.
+pub async fn password_update_handler(
+    caller: AuthUser,
+    req: PasswordUpdateRequest,
+    env: Environment,
+) -> Result<impl Reply, Rejection> {
+    let own_password = caller.id == req.id;
+    if !own_password && caller.role != Role::Admin {
+        return Err(ApiError::forbidden("you can only change your own password").into());
+    }
+    validate_password(&req.new_password)?;
 
-    let email = _req.email.clone();
-    match service::create_user(_req, _env.db()).await {
-        Err(e) => {
-            println!("[user_create_handler] Error creating user {}: {:?}", &email, e.message);
-            return Err(warp::reject::custom(UserError::CreateError))
-        },
-        _ => {
-            println!("[user_create_handler] User creation successful: {:?}", &email);
-            return Ok(warp::reply::json(&json!({"status": "success"})));
+    let user = service::get_user_by_id(&env.db, req.id)
+        .await?
+        .ok_or_else(user_not_found)?;
+    if own_password {
+        let current = req.current_password.unwrap_or_default();
+        if !verify_password(current, user.password_hash).await? {
+            return Err(ApiError::forbidden("current password is incorrect").into());
         }
     }
-}
 
-// Updates user
-pub async fn user_update_handler(_req: UserUpdateRequest, _env: Environment, _user: AuthUser) -> WebResult<impl Reply> {
-    println!("[user_update_handler][{}] Updating user {}", _user, &_req.email);
-    service::update_user(_req, _env.db()).await.map(|_e| UserError::UpdateError);
-    Ok(warp::reply::json(&json!({"status":"success", "message":"User updated"})))
-}
-
-// Changes own or other's password if admin
-pub async fn password_update_handler(mut _req: PasswordUpdateRequest, _env: Environment, _user: AuthUser) -> WebResult<impl Reply> {
-    // Reject non-admins changing passwords of other users
-    if _user.role != Role::Admin && _user.id != _req.id.to_string() {
-        return Err(warp::reject::custom(UserError::UpdateError));
-    }
-
-    let result = service::get_user_by_id(_req.id, _env.db()).await?;
-    let mut user = match result {
-        Some(_) => result.unwrap(),
-        None => return Err(warp::reject::custom(UserError::UpdateError)),
-    };
-
-    println!("[password_update_handler] Action performed by {} on {}", _user.id, user.id);
-    // current_password is required for users/admins to change their own passwords, but allow admins change others'
-    if (_user.id != user.id.to_string() && _user.role != Role::Admin) || _user.id == user.id.to_string() {
-        let is_valid = _env
-            .argon()
-            .verifier()
-            .with_hash(&user.password)
-            .with_password(&_req.current_password)
-            .verify()
-            .or(Err(warp::reject::custom(UserError::UpdateError)))?;
-
-        if !is_valid {
-            return Err(warp::reject::custom(AuthError::InvalidCredentials));
-        }
-    }
-
-    let hash = _env.argon().hasher().with_password(&_req.new_password).hash().unwrap();
-    user.password = hash;
-    service::update_user_password(user, _env.db()).await.map(|_e| UserError::UpdateError);
-    Ok(warp::reply::json(&json!({"status":"success", "message":"Password updated"})))
+    let password_hash = hash_password(req.new_password).await?;
+    service::update_password(&env.db, req.id, &password_hash).await?;
+    Ok(StatusCode::NO_CONTENT)
 }

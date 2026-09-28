@@ -1,44 +1,58 @@
-use warp::{Filter, Reply};
+use uuid::Uuid;
 use warp::filters::BoxedFilter;
+use warp::{Filter, Reply};
 
-use crate::{auth, environment};
-use crate::auth::models::Role;
-use crate::environment::Environment;
+use crate::auth::Role;
+use crate::auth::middleware::{authenticated, with_auth};
+use crate::environment::{Environment, json_body, with_env};
 use crate::users::handlers;
 
-pub fn routes(_env: Environment) -> BoxedFilter<(impl Reply, )> {
-    let get_users_route = warp::get().and(warp::path!("api" / "users")
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::get_users_handler));
+pub fn routes(env: Environment) -> BoxedFilter<(impl Reply,)> {
+    let admin = || with_auth(env.clone(), Role::Admin);
 
-    let get_user_route = warp::get().and(warp::path!("api" / "users" / String)
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::get_user_by_id_handler));
+    let list = warp::path!("api" / "users")
+        .and(warp::get())
+        .and(admin())
+        .and(with_env(env.clone()))
+        .and_then(handlers::get_users_handler);
 
-    let user_create_route = warp::post().and(warp::path!("api" / "users")
-        .and(warp::body::json())
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::user_create_handler));
+    let get = warp::path!("api" / "users" / Uuid)
+        .and(warp::get())
+        .and(admin())
+        .and(with_env(env.clone()))
+        .and_then(handlers::get_user_by_id_handler);
 
-    let user_update_route = warp::put().and(warp::path!("api" / "users")
-        .and(warp::body::json())
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::user_update_handler));
+    let create = warp::path!("api" / "users")
+        .and(warp::post())
+        .and(admin())
+        .and(json_body())
+        .and(with_env(env.clone()))
+        .and_then(handlers::user_create_handler);
 
-    let user_password_update_route = warp::put().and(warp::path!("api" / "users" / "changePassword")
-        .and(warp::body::json())
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::authenticated())
-        .and_then(handlers::password_update_handler));
+    let update = warp::path!("api" / "users")
+        .and(warp::put())
+        .and(admin())
+        .and(json_body())
+        .and(with_env(env.clone()))
+        .and_then(handlers::user_update_handler);
 
-    let routes = get_users_route.or(get_user_route)
-        .or(user_create_route)
-        .or(user_update_route)
-        .or(user_password_update_route);
+    let delete = warp::path!("api" / "users" / Uuid)
+        .and(warp::delete())
+        .and(admin())
+        .and(with_env(env.clone()))
+        .and_then(handlers::user_delete_handler);
 
-    routes.boxed()
+    let change_password = warp::path!("api" / "users" / "changePassword")
+        .and(warp::put())
+        .and(authenticated(env.clone()))
+        .and(json_body())
+        .and(with_env(env.clone()))
+        .and_then(handlers::password_update_handler);
+
+    list.or(get)
+        .or(create)
+        .or(update)
+        .or(delete)
+        .or(change_password)
+        .boxed()
 }

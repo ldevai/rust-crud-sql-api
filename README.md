@@ -1,157 +1,97 @@
-# Rust Crud Application using Warp and SQL (Postgres) with JWT authentication
+# rust-crud-sql-api
 
-This boilerplate application offers the following endpoints, with JWT role-based validation on most of them:
+A JWT-secured REST API in Rust: warp filters, Postgres through sqlx, argon2
+passwords and role-based routes (`User` / `Admin`) — users, articles and comments,
+laid out as routes → handlers → service per module.
 
-| Path | Method |
-|------|--------|
-| /api/auth/register | POST |
-| /api/auth/login | POST |
-| /api/articles_home | GET |
-| /api/articles | GET |
-| /api/articles/{url} | GET |
-| /api/articles/updateHomeView/{id} | GET |
-| /api/articles | POST |
-| /api/articles | PUT |
-| /api/articles/{id} | DELETE |
-| /api/articles/comments | POST |
-| /api/articles/comments/{article_id}/{comment_id} | DELETE |
-| /api/users | GET |
-| /api/users/{id} | GET |
-| /api/users/updateHomeView/{id} | GET |
-| /api/users | POST |
-| /api/users | PUT |
-| /api/users/{id} | DELETE |
-| /api/users/changePassword | PUT |
+> Maintained in [devai-io/devai_boilerplates](https://github.com/devai-io/devai_boilerplates/tree/main/rust-crud-sql-api),
+> the public home of every [devai.io](https://devai.io) project; this repo carries the same code.
 
-<br />
+## Run
 
-The **.env** file contains the mongodb connection details and encryption keys.
+    git clone https://github.com/ldevai/rust-crud-sql-api.git
+    cd rust-crud-sql-api
+    docker compose up --build
 
-<br />
+The API answers on http://localhost:8080 (`curl localhost:8080/health` → `ok`).
+Postgres keeps its state in `./data/postgres`; `schema.sql` is applied on every
+start (`IF NOT EXISTS`), so there is no migrate step.
 
+Without Docker: run a Postgres, export the variables from `.env.example`, then
+`cargo run` (Rust 1.98, the toolchain the Dockerfile pins).
 
-## Development environment setup
+## How it works
 
-Requirements: rust toolchain, docker, docker-container
+| Method | Path                                         | Auth    | Result                                                      |
+|--------|----------------------------------------------|---------|-------------------------------------------------------------|
+| GET    | `/health`                                    | —       | `200 ok`                                                    |
+| POST   | `/api/auth/register`                         | —       | `{email, name, password}` → `201` user (role `User`), `409` if taken |
+| POST   | `/api/auth/login`                            | —       | `{email, password}` → `200 {id, email, name, role, access_token}` |
+| GET    | `/api/articles`                              | —       | `200` all articles, without content                         |
+| GET    | `/api/articles_home`                         | —       | `200` articles with `in_home: true`, without content        |
+| GET    | `/api/articles/{url}`                        | —       | `200` full article, or `404`                                |
+| POST   | `/api/articles`                              | Admin   | `{title, url, content?, tags?, in_home?}` → `201`, `409` if the url exists |
+| PUT    | `/api/articles`                              | Admin   | same body plus `id` → `200`, or `404`                       |
+| DELETE | `/api/articles/{id}`                         | Admin   | `204` (its comments go with it), or `404`                   |
+| PUT    | `/api/articles/updateHomeView/{id}`          | Admin   | flips `in_home` → `200` article                             |
+| GET    | `/api/articles/comments/{article_id}`        | —       | `200` comments, oldest first                                |
+| POST   | `/api/articles/comments`                     | —       | `{article_id, author, email, content}` → `201`, `404` for an unknown article |
+| DELETE | `/api/articles/comments/{article_id}/{id}`   | Admin   | `204`, or `404`                                             |
+| GET    | `/api/users`                                 | Admin   | `200` all users                                             |
+| GET    | `/api/users/{id}`                            | Admin   | `200` user, or `404`                                        |
+| POST   | `/api/users`                                 | Admin   | `{email, name, password, role?}` → `201`                    |
+| PUT    | `/api/users`                                 | Admin   | `{id, email, name, role}` → `200`                           |
+| DELETE | `/api/users/{id}`                            | Admin   | `204`, or `404`                                             |
+| PUT    | `/api/users/changePassword`                  | any     | `{id, current_password?, new_password}` → `204`             |
 
-Create and start a postgres instance with docker:
+- **Auth** — login returns an HS256 JWT signed with `AUTH_SECRET` (`sub` = user id,
+  `role`, 24 h expiry); send it as `Authorization: Bearer <token>`. Verification pins
+  HS256 and requires `exp`. `with_auth(env, Role::Admin)` in `src/auth/middleware.rs`
+  is the warp filter that answers `401` without a valid token and `403` when the role
+  is not enough.
+- **Passwords** — argon2id (RustCrypto `argon2`), hashed on tokio's blocking pool.
+  Users change their own password with `current_password`; admins can reset anyone's.
+- **Roles** — registration always creates a `User`. Promote the first admin in the
+  database, then log in again (the role travels inside the JWT):
 
-    docker-compose up -d db adminer
+      docker compose exec db psql -U demo -d demo \
+        -c "UPDATE users SET role = 'Admin' WHERE email = 'admin@test.com'"
 
+- **Comments** are public to read and write; the commenter's email is stored but
+  never returned.
+- **Errors** are always JSON: `{"error": "message"}`, including warp's own
+  rejections (bad JSON `400`, wrong content-type `415`, wrong method `405`).
 
-Open **adminer** on your browser at **http://localhost:8080** (or your preferred SQL client) and create the tables in **db/initial.sql***
+Try it:
 
-    Type: Postgres
-    Server: localhost
-    Port: 5432
-    Username: demo
-    Password: demo
-    Database: demo
+    curl -X POST localhost:8080/api/auth/register -H 'content-type: application/json' \
+      -d '{"email":"admin@test.com","name":"Admin","password":"supersecret"}'
+    # promote it with the psql command above, then:
+    TOKEN=$(curl -s localhost:8080/api/auth/login -H 'content-type: application/json' \
+      -d '{"email":"admin@test.com","password":"supersecret"}' | jq -r .access_token)
+    curl -X POST localhost:8080/api/articles -H "Authorization: Bearer $TOKEN" \
+      -H 'content-type: application/json' -d '{"title":"Hello","url":"hello","content":"First post"}'
+    curl localhost:8080/api/articles/hello
 
-<br />
+## Layout
 
-## Running the Application
-Run the application with the command:
+    src/main.rs          route tree, request log, graceful shutdown
+    src/environment.rs   config, Postgres pool, schema bootstrap, shared filters
+    src/error.rs         ApiError and the rejection → {"error": ...} mapping
+    src/auth/            JWT + argon2 (mod.rs), with_auth filter, register/login
+    src/users/           routes → handlers → service (sqlx queries)
+    src/articles/        routes → handlers → service, comments included
+    schema.sql           tables and indexes, applied on startup
 
-    cargo run
+## Deploy
 
-Alternatively, you can run the command below to relaunch at any changes to the given resources:
+Fork this repo (or push a copy to your own GitHub repo) and the shipped workflow
+(`.github/workflows/ci.yml`) tests the compose stack, publishes the image to
+GHCR, and — once you set the `DEPLOY_HOST` / `DEPLOY_USER` variables and
+`DEPLOY_KEY` secret — deploys it to your server over ssh. Set a long random
+`AUTH_SECRET` on the server; the one in `compose.yaml` is for local use only.
 
-    cargo watch -w src -w Cargo.toml -w .env -x run
-
-<br />
-
-## Testing
-
-#### Register
-
-    curl -H 'Content-Type: application/json' -d '{"name":"Test","email":"test@test.com","password":"abc123"}' http://localhost:8000/api/auth/register
-
-#### Login
-
-    curl -H 'Content-Type: application/json' -d '{"email":"test@test.com","password":"abc123"}' http://localhost:8000/api/auth/login
-
-If everything is working, and you are using Linux/MacOS/Cygwin or have access to a bash, the one-liner below can be useful to parse the token from the response:
-
-    TOKEN=$(curl -H 'Content-Type: application/json' -d '{"email":"test@test.com","password":"abc123"}' http://localhost:8000/api/auth/login | python -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
-    echo $TOKEN
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles
-
-Querying the /users API without Admin role should result in an 401 Unauthorized error.
-
-#### Change user role to Admin on Adminer console and login again:
-
-    UPDATE users SET role='Admin' WHERE email='test@test.com';
-
-<br />
-
-
-### Articles API
-
-#### Get articles
-
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles
-
-#### Create article
-
-    curl -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"title":"Test Article","url":"test","content":"Content of full article"}' http://localhost:8000/api/articles 
-
-#### Get first article
-
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles/test
-
-#### Update Article
-
-    ID=$(curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles | python -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])')
-    echo $ID
-    curl -X PUT -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"id":'\"${ID}\"',"title":"Updated Test Article","url":"test","content":"Updated content of full article","in_home":true}' http://localhost:8000/api/articles
-
-Check article after updated:
-
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles/test
-
-#### Delete article
-
-    ID=$(curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles | python -c 'import json,sys;print(json.load(sys.stdin)[0]["id"])')
-    curl -X DELETE -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/articles/${ID}
-
-### Users API
-
-##### Get users
-
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users
-
-#### Create user
-
-    curl -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"email":"TestUser","name":"test","password":"abc123","role":"User"}' http://localhost:8000/api/users 
-
-#### Get new user
-
-    ID=$(curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users | python -c 'import json,sys;print(json.load(sys.stdin)[1]["id"])')
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users/$ID
-
-#### Update new user
-
-    ID=$(curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users | python -c 'import json,sys;print(json.load(sys.stdin)[1]["id"])')
-    curl -X PUT -H "Authorization: Bearer ${TOKEN}" -H 'Content-Type: application/json' -d '{"id":'\"${ID}\"',"email":"UpdatedTestUser","name":"test","role":"User"}' http://localhost:8000/api/users 
-
-Get updated user field
-
-    curl -H "Authorization: Bearer ${TOKEN}" http://localhost:8000/api/users | python -c 'import json,sys;print(json.load(sys.stdin)[1]["email"])'
-
-<br />
-
-### **Building the application**
-
-#### Install sqlx-cli cargo dependency:
-
-    cargo install sqlx-cli
-
-Generate sqlx schema file required for "offline" builds (without need to reach DB on build time). This step is only required if any table schema is changed.
-
-    cargo sqlx prepare
-
-#### Run cargo build
-
-    cargo build --release
+---
+Part of [devai.io](https://devai.io) — Rust API boilerplates. Same API on MongoDB:
+[`rust-crud-nosql-api`](https://github.com/devai-io/devai_boilerplates/tree/main/rust-crud-nosql-api); actix-web take:
+[`rust-crud-actix-mongo-api`](https://github.com/devai-io/devai_boilerplates/tree/main/rust-crud-actix-mongo-api).

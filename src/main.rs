@@ -1,37 +1,52 @@
+use tokio::signal::unix::{SignalKind, signal};
 use warp::Filter;
 
 use crate::environment::Environment;
 
+mod articles;
 mod auth;
 mod environment;
 mod error;
 mod users;
-mod articles;
-
-type Result<T> = std::result::Result<T, error::AppError>;
-type WebResult<T> = std::result::Result<T, warp::reject::Rejection>;
 
 #[tokio::main]
 async fn main() {
-    if dotenv::dotenv().is_err() {
-        eprintln!("Error reading .env file in the current folder!");
+    let port: u16 = std::env::var("PORT")
+        .unwrap_or_else(|_| "8080".to_string())
+        .parse()
+        .expect("PORT must be a number");
+    let env = Environment::from_env().await;
+
+    let health = warp::path!("health").and(warp::get()).map(|| "ok");
+    let routes = health
+        .or(auth::routes::routes(env.clone()))
+        .or(users::routes::routes(env.clone()))
+        .or(articles::routes::routes(env))
+        .recover(error::handle_rejection)
+        .with(warp::log::custom(|info| {
+            println!(
+                "{} {} {} {:?}",
+                info.method(),
+                info.path(),
+                info.status(),
+                info.elapsed()
+            );
+        }));
+
+    println!("listening on :{port}");
+    warp::serve(routes)
+        .bind(([0, 0, 0, 0], port))
+        .await
+        .graceful(shutdown_signal())
+        .run()
+        .await;
+}
+
+/// `docker stop` sends SIGTERM; finish in-flight requests and exit.
+async fn shutdown_signal() {
+    let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+    tokio::select! {
+        _ = sigterm.recv() => {}
+        _ = tokio::signal::ctrl_c() => {}
     }
-
-    let _env = match Environment::new().await {
-        Ok(e) => e,
-        Err(_e) => panic!("Unable to read environment configuration: {}", _e),
-    };
-
-    let auth_routes = auth::routes::routes(_env.clone());
-    let user_routes = users::routes::routes(_env.clone());
-    let article_routes = articles::routes::routes(_env.clone());
-    let error_handler = error::handlers::error_handler;
-
-    let routes = article_routes
-        .or(auth_routes)
-        .or(user_routes)
-        .recover(error_handler);
-
-    println!("Starting server on {}", _env.config().host);
-    warp::serve(routes).run(_env.config().host).await;
 }

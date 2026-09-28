@@ -1,0 +1,26 @@
+services:
+  app:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      PORT: "8080"
+      DATABASE_URL: postgres://demo:demo@db:5432/demo
+      AUTH_SECRET: change-me-in-production
+    depends_on:
+      db:
+        condition: service_healthy
+
+  db:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: demo
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d demo"]
+      interval: 5s
+      timeout: 3s
+      retries: 10

@@ -1,64 +1,81 @@
-use warp::{Filter, Reply};
+use uuid::Uuid;
 use warp::filters::BoxedFilter;
+use warp::{Filter, Reply};
 
-use crate::{auth, environment};
-use crate::auth::models::Role;
-use crate::environment::Environment;
 use crate::articles::handlers;
+use crate::auth::Role;
+use crate::auth::middleware::with_auth;
+use crate::environment::{Environment, json_body, with_env};
 
-pub fn routes(_env: Environment) -> BoxedFilter<(impl Reply, )> {
-    let get_home_article_headers_route = warp::get().and(warp::path!("api" / "articles_home")
-        .and(environment::with_env(_env.clone()))
-        .and_then(handlers::get_home_article_headers_handler));
+pub fn routes(env: Environment) -> BoxedFilter<(impl Reply,)> {
+    let admin = || with_auth(env.clone(), Role::Admin);
 
-    let get_article_headers_route = warp::get().and(warp::path!("api" / "articles")
-        .and(environment::with_env(_env.clone()))
-        .and_then(handlers::get_article_headers_handler));
+    let list = warp::path!("api" / "articles")
+        .and(warp::get())
+        .and(with_env(env.clone()))
+        .and_then(handlers::get_articles_handler);
 
-    let get_article_route = warp::get().and(warp::path!("api" / "articles" / String)
-        .and(environment::with_env(_env.clone()))
-        .and_then(handlers::get_article_by_url_handler));
+    let list_home = warp::path!("api" / "articles_home")
+        .and(warp::get())
+        .and(with_env(env.clone()))
+        .and_then(handlers::get_home_articles_handler);
 
-    let create_article_route = warp::post().and(warp::path!("api" / "articles")
-        .and(warp::body::json())
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::create_article_handler));
+    let get = warp::path!("api" / "articles" / String)
+        .and(warp::get())
+        .and(with_env(env.clone()))
+        .and_then(handlers::get_article_by_url_handler);
 
-    let update_article_route = warp::put().and(warp::path!("api" / "articles")
-        .and(warp::body::json())
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::update_article_handler));
+    let create = warp::path!("api" / "articles")
+        .and(warp::post())
+        .and(admin())
+        .and(json_body())
+        .and(with_env(env.clone()))
+        .and_then(handlers::create_article_handler);
 
-    let delete_article_route = warp::delete().and(warp::path!("api" / "articles" / String)
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::delete_article_handler));
+    let update = warp::path!("api" / "articles")
+        .and(warp::put())
+        .and(admin())
+        .and(json_body())
+        .and(with_env(env.clone()))
+        .and_then(handlers::update_article_handler);
 
-    let update_home_view_route = warp::get().and(warp::path!("api" / "articles" / "updateHomeView" / String)
-        .and(environment::with_env(_env.clone()))
-        .and(auth::middleware::with_auth(Role::Admin))
-        .and_then(handlers::update_home_view_handler));
+    let delete = warp::path!("api" / "articles" / Uuid)
+        .and(warp::delete())
+        .and(admin())
+        .and(with_env(env.clone()))
+        .and_then(handlers::delete_article_handler);
 
-    let get_comments_route = warp::get().and(warp::path!("api" / "articles" / "comments" / String)
-        .and(environment::with_env(_env.clone()))
-        .and_then(handlers::get_article_comments_handler));
+    let toggle_home = warp::path!("api" / "articles" / "updateHomeView" / Uuid)
+        .and(warp::put())
+        .and(admin())
+        .and(with_env(env.clone()))
+        .and_then(handlers::update_home_view_handler);
 
-    let post_comment_route = warp::post().and(warp::path!("api" / "articles" / "comments")
-        .and(warp::body::json())
-        .and(environment::with_env(_env.clone()))
-        .and_then(handlers::post_comment_handler));
+    let comments = warp::path!("api" / "articles" / "comments" / Uuid)
+        .and(warp::get())
+        .and(with_env(env.clone()))
+        .and_then(handlers::get_comments_handler);
 
-    let routes = get_home_article_headers_route
-        .or(get_article_headers_route)
-        .or(get_article_route)
-        .or(create_article_route)
-        .or(update_article_route)
-        .or(delete_article_route)
-        .or(update_home_view_route)
-        .or(get_comments_route)
-        .or(post_comment_route);
+    let post_comment = warp::path!("api" / "articles" / "comments")
+        .and(warp::post())
+        .and(json_body())
+        .and(with_env(env.clone()))
+        .and_then(handlers::post_comment_handler);
 
-    routes.boxed()
+    let delete_comment = warp::path!("api" / "articles" / "comments" / Uuid / Uuid)
+        .and(warp::delete())
+        .and(admin())
+        .and(with_env(env.clone()))
+        .and_then(handlers::delete_comment_handler);
+
+    list.or(list_home)
+        .or(get)
+        .or(create)
+        .or(update)
+        .or(delete)
+        .or(toggle_home)
+        .or(comments)
+        .or(post_comment)
+        .or(delete_comment)
+        .boxed()
 }

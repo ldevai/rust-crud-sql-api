@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: docker compose up -d --build
+      - run: |
+          timeout 60 sh -c 'until curl -fs localhost:8080/health; do sleep 2; done' \
+            || { docker compose logs; exit 1; }
+      - run: docker compose down
+
+  publish:
+    needs: test
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - run: docker build -t "ghcr.io/${{ github.repository }}:latest" .
+      - run: docker push "ghcr.io/${{ github.repository }}:latest"
+
+  deploy:
+    needs: publish
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_HOST != ''
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          install -m 600 /dev/null key && echo "${{ secrets.DEPLOY_KEY }}" > key
+          ssh -i key -o StrictHostKeyChecking=accept-new \
+            "${{ vars.DEPLOY_USER }}@${{ vars.DEPLOY_HOST }}" \
+            "cd /srv/rust-crud-sql-api && git pull --ff-only && docker compose up -d --build"

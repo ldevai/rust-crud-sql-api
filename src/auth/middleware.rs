@@ -1,74 +1,45 @@
-use warp::Filter;
-use warp::http::{HeaderMap, HeaderValue};
+use warp::{Filter, Rejection};
 
-use crate::{Result, WebResult};
-use crate::auth::{BEARER, JWT_SECRET};
-use crate::auth::models::{AuthUser, Claims, Role};
-use crate::error::AppError;
+use crate::auth::Role;
+use crate::auth::models::AuthUser;
+use crate::environment::Environment;
+use crate::error::ApiError;
 
-// Authentication middleware
-pub fn authenticated() -> impl Filter<Extract=(AuthUser, ), Error=warp::reject::Rejection> + Clone {
-    warp::header::headers_cloned()
-        .map(move |headers: HeaderMap<HeaderValue>| headers)
-        .and_then(authorize_any)
+/// Any logged-in user.
+pub fn authenticated(
+    env: Environment,
+) -> impl Filter<Extract = (AuthUser,), Error = Rejection> + Clone {
+    with_auth(env, Role::User)
 }
 
-// Decodes JWT from header, checks its validity and assembles User object to be passed to the handlers
-async fn authorize_any(headers: HeaderMap<HeaderValue>) -> WebResult<AuthUser> {
-    match jwt_from_header(&headers) {
-        Ok(jwt) => {
-            let decoded = jsonwebtoken::decode::<Claims>(
-                &jwt,
-                &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET),
-                &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS512),
-            )
-                .map_err(|_| warp::reject::custom(AppError::JWTTokenError))?;
-
-            let user = AuthUser::new(decoded.claims.sub, decoded.claims.role);
-            Ok(user)
-        }
-        Err(e) => return Err(warp::reject::custom(AppError::from(e))),
-    }
-}
-
-// with_auth and authorize handles authorization of specific roles
-pub fn with_auth(role: Role) -> impl Filter<Extract=(AuthUser, ), Error=warp::reject::Rejection> + Clone {
-    warp::header::headers_cloned()
-        .map(move |headers: HeaderMap<HeaderValue>| (role.clone(), headers))
-        .and_then(authorize)
-}
-
-async fn authorize((role, headers): (Role, HeaderMap<HeaderValue>)) -> WebResult<AuthUser> {
-    match jwt_from_header(&headers) {
-        Ok(jwt) => {
-            let decoded = jsonwebtoken::decode::<Claims>(
-                &jwt,
-                &jsonwebtoken::DecodingKey::from_secret(JWT_SECRET),
-                &jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS512),
-            )
-                .map_err(|_| warp::reject::custom(AppError::JWTTokenError))?;
-
-            if role == Role::Admin && Role::from_str(&decoded.claims.role) != Role::Admin {
-                return Err(warp::reject::custom(AppError::NoPermissionError));
+/// Reads `Authorization: Bearer <jwt>` and hands the caller to the handler:
+/// 401 without a valid token, 403 when the token's role is not enough.
+pub fn with_auth(
+    env: Environment,
+    required: Role,
+) -> impl Filter<Extract = (AuthUser,), Error = Rejection> + Clone {
+    let keys = env.keys;
+    warp::header::optional::<String>("authorization").and_then(move |header: Option<String>| {
+        let keys = keys.clone();
+        async move {
+            let token = header
+                .as_deref()
+                .and_then(|value| value.strip_prefix("Bearer "))
+                .ok_or_else(|| ApiError::unauthorized("missing bearer token"))?;
+            let claims = keys.verify_jwt(token)?;
+            if !claims.role.grants(required) {
+                return Err(
+                    ApiError::forbidden(format!("requires role {}", required.as_str())).into(),
+                );
             }
-            let user = AuthUser::new(decoded.claims.sub, decoded.claims.role);
-            Ok(user)
+            let id = claims
+                .sub
+                .parse()
+                .map_err(|_| ApiError::unauthorized("invalid or expired token"))?;
+            Ok::<_, Rejection>(AuthUser {
+                id,
+                role: claims.role,
+            })
         }
-        Err(e) => return Err(warp::reject::custom(AppError::from(e))),
-    }
-}
-
-fn jwt_from_header(headers: &HeaderMap<HeaderValue>) -> Result<String> {
-    let header = match headers.get(warp::http::header::AUTHORIZATION) {
-        Some(v) => v,
-        None => return Err(AppError::NoAuthHeaderError),
-    };
-    let auth_header = match std::str::from_utf8(header.as_bytes()) {
-        Ok(v) => v,
-        Err(_) => return Err(AppError::NoAuthHeaderError),
-    };
-    if !auth_header.starts_with(BEARER) {
-        return Err(AppError::InvalidAuthHeaderError);
-    }
-    Ok(auth_header.trim_start_matches(BEARER).to_owned())
+    })
 }

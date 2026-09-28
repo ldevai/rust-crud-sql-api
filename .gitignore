@@ -1,6 +1,4 @@
-target/
-Cargo.lock
-**/*.rs.bk
-*.iml
-.idea/
 data/
+target/
+.env
+.DS_Store

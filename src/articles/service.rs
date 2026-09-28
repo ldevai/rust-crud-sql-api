@@ -1,150 +1,121 @@
-use chrono::Utc;
-use sqlx::{postgres::PgPool, query_as_unchecked, query_unchecked};
-use warp::Rejection;
+use sqlx::PgPool;
+use uuid::Uuid;
 
-use crate::articles::models::{Article, Comment};
+use crate::articles::models::{Article, ArticleFields, ArticleSummary, Comment, NewComment};
+use crate::error::{ApiError, conflict_on_duplicate};
 
-pub async fn get_article_by_id(_id: uuid::Uuid, connection: &PgPool) -> Result<Option<Article>, Rejection> {
-    println!("[get_article_by_id] _id: {}", _id);
-    let result = query_as_unchecked!(
-        Article,
-        r#"SELECT id, title, url, content, created_at, updated_at, in_home FROM articles WHERE id=$1"#,
-        &_id
+const URL_TAKEN: &str = "an article with this url already exists";
+
+pub async fn get_articles(db: &PgPool, home_only: bool) -> Result<Vec<ArticleSummary>, ApiError> {
+    let articles = sqlx::query_as(
+        "SELECT id, title, url, tags, in_home, created_at, updated_at FROM articles
+         WHERE in_home OR NOT $1 ORDER BY created_at DESC",
     )
-        .fetch_one(connection)
-        .await
-        .map_err(|_e| { anyhow::Error::new(_e) })
-        .ok();
-    Ok(result)
+    .bind(home_only)
+    .fetch_all(db)
+    .await?;
+    Ok(articles)
 }
 
-pub async fn get_article_by_url(_url: String, connection: &PgPool) -> Result<Option<Article>, Rejection> {
-    println!("[get_article_by_url] _url: {}", _url);
-    let result = query_as_unchecked!(
-        Article,
-        r#"SELECT id, title, url, content, created_at, updated_at, in_home FROM articles WHERE url=$1"#,
-        _url
-    )
-        .fetch_one(connection)
-        .await
-        .map_err(|_e| { anyhow::Error::new(_e) })
-        .ok();
-    Ok(result)
+pub async fn get_article_by_url(db: &PgPool, url: &str) -> Result<Option<Article>, ApiError> {
+    let article = sqlx::query_as("SELECT * FROM articles WHERE url = $1")
+        .bind(url)
+        .fetch_optional(db)
+        .await?;
+    Ok(article)
 }
 
-pub async fn get_home_article_headers(connection: &PgPool) -> Result<Option<Vec<Article>>, Rejection> {
-    let result = query_as_unchecked!(
-        Article,
-        r#"SELECT id, title, url, '' as content, created_at, updated_at, in_home FROM articles WHERE in_home=true"#
+pub async fn create_article(db: &PgPool, article: &ArticleFields) -> Result<Article, ApiError> {
+    sqlx::query_as(
+        "INSERT INTO articles (title, url, content, tags, in_home) VALUES ($1, $2, $3, $4, $5) RETURNING *",
     )
-        .fetch_all(connection)
-        .await
-        .map_err(|_e| { anyhow::Error::new(_e) })
-        .ok();
-    Ok(result)
+    .bind(article.title.trim())
+    .bind(&article.url)
+    .bind(&article.content)
+    .bind(&article.tags)
+    .bind(article.in_home)
+    .fetch_one(db)
+    .await
+    .map_err(conflict_on_duplicate(URL_TAKEN))
 }
 
-
-pub async fn get_article_headers(connection: &PgPool) -> Result<Option<Vec<Article>>, Rejection> {
-    let result = query_as_unchecked!(
-        Article,
-        r#"SELECT id, title, url, '' as content, created_at, updated_at, in_home FROM articles"#
+pub async fn update_article(
+    db: &PgPool,
+    id: Uuid,
+    article: &ArticleFields,
+) -> Result<Option<Article>, ApiError> {
+    sqlx::query_as(
+        "UPDATE articles SET title = $1, url = $2, content = $3, tags = $4, in_home = $5, updated_at = now()
+         WHERE id = $6 RETURNING *",
     )
-        .fetch_all(connection)
-        .await
-        .map_err(|_e| { anyhow::Error::new(_e) })
-        .ok();
-    Ok(result)
+    .bind(article.title.trim())
+    .bind(&article.url)
+    .bind(&article.content)
+    .bind(&article.tags)
+    .bind(article.in_home)
+    .bind(id)
+    .fetch_optional(db)
+    .await
+    .map_err(conflict_on_duplicate(URL_TAKEN))
 }
 
-pub async fn create_article(_article: &Article, connection: &PgPool) -> Result<Option<u64>, Rejection> {
-    let _result = query_unchecked!(
-        r#"INSERT INTO articles (id, title, url, content, created_at, in_home) VALUES ($1, $2, $3, $4, $5, $6)"#,
-        _article.id,
-        _article.title,
-        _article.url,
-        _article.content,
-        Utc::now(),
-        _article.in_home
-    )
-        .execute(connection)
-        .await
-        .unwrap();
-
-    Ok(Some(0))
+pub async fn delete_article(db: &PgPool, id: Uuid) -> Result<bool, ApiError> {
+    let result = sqlx::query("DELETE FROM articles WHERE id = $1")
+        .bind(id)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
 
-pub async fn update_article(_article: &Article, connection: &PgPool) -> Result<Option<u64>, Rejection> {
-    query_unchecked!(
-        r#"UPDATE articles SET title=$1, url=$2, content=$3, updated_at=$4, in_home=$5 WHERE id=$6"#,
-        _article.title,
-        _article.url,
-        _article.content,
-        _article.updated_at,
-        _article.in_home,
-        _article.id
+/// Flips `in_home` in one statement, so concurrent toggles cannot lose an update.
+pub async fn toggle_home_view(db: &PgPool, id: Uuid) -> Result<Option<Article>, ApiError> {
+    let article = sqlx::query_as(
+        "UPDATE articles SET in_home = NOT in_home, updated_at = now() WHERE id = $1 RETURNING *",
     )
-        .execute(connection)
-        .await
-        .unwrap();
-    Ok(Some(0))
+    .bind(id)
+    .fetch_optional(db)
+    .await?;
+    Ok(article)
 }
 
-pub async fn delete_article(_id: &str, connection: &PgPool) -> Result<Option<u64>, Rejection> {
-    query_as_unchecked!(
-        Article,
-        r#"DELETE FROM articles WHERE id=$1"#,
-        uuid::Uuid::parse_str(&_id).unwrap()
+pub async fn get_comments(db: &PgPool, article_id: Uuid) -> Result<Vec<Comment>, ApiError> {
+    let comments = sqlx::query_as(
+        "SELECT id, article_id, author, content, created_at FROM comments WHERE article_id = $1 ORDER BY created_at",
     )
-        .execute(connection)
-        .await
-        .unwrap();
-    Ok(Some(0))
+    .bind(article_id)
+    .fetch_all(db)
+    .await?;
+    Ok(comments)
 }
 
-pub async fn update_home_view(_id: String, connection: &PgPool) -> Result<Option<u64>, Rejection> {
-    let uuid = uuid::Uuid::parse_str(&_id).unwrap();
-    query_unchecked!(
-        r#"UPDATE articles SET in_home=(SELECT NOT in_home FROM articles WHERE id=$1) WHERE id=$2"#,
-        uuid,
-        uuid
+pub async fn create_comment(db: &PgPool, comment: &NewComment) -> Result<Comment, ApiError> {
+    sqlx::query_as(
+        "INSERT INTO comments (article_id, author, email, content) VALUES ($1, $2, $3, $4)
+         RETURNING id, article_id, author, content, created_at",
     )
-        .execute(connection)
-        .await
-        .unwrap();
-    Ok(Some(0))
+    .bind(comment.article_id)
+    .bind(comment.author.trim())
+    .bind(comment.email.trim())
+    .bind(&comment.content)
+    .fetch_one(db)
+    .await
+    .map_err(|err| match &err {
+        sqlx::Error::Database(e) if e.is_foreign_key_violation() => {
+            ApiError::not_found("article not found")
+        }
+        _ => ApiError::internal(err),
+    })
 }
 
-
-
-pub async fn get_comments(_id: String, connection: &PgPool) -> Result<Option<Vec<Comment>>, Rejection> {
-    let result = query_as_unchecked!(
-        Comment,
-        r#"SELECT id, author, email, content, article_id, created_at, updated_at FROM comments WHERE article_id=$1"#,
-        uuid::Uuid::parse_str(&_id).unwrap()
-    )
-        .fetch_all(connection)
-        .await
-        .map_err(|_e| { anyhow::Error::new(_e) })
-        .ok();
-    Ok(result)
-}
-
-pub async fn create_comment(_comment: &Comment, connection: &PgPool) -> Result<Option<u64>, Rejection> {
-    let timestamp = Utc::now();
-    let _result = query_unchecked!(
-        r#"INSERT INTO comments (id, author, email, content, article_id, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
-        _comment.id,
-        _comment.author,
-        _comment.email,
-        _comment.content,
-        _comment.article_id,
-        timestamp,
-        timestamp
-    )
-        .execute(connection)
-        .await
-        .unwrap();
-
-    Ok(Some(0))
+pub async fn delete_comment(
+    db: &PgPool,
+    article_id: Uuid,
+    comment_id: Uuid,
+) -> Result<bool, ApiError> {
+    let result = sqlx::query("DELETE FROM comments WHERE id = $1 AND article_id = $2")
+        .bind(comment_id)
+        .bind(article_id)
+        .execute(db)
+        .await?;
+    Ok(result.rows_affected() > 0)
 }
